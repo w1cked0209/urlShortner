@@ -1,0 +1,68 @@
+#pragma once
+
+#include <cstddef>
+#include <cstdint>
+#include <functional>
+#include <string>
+#include <string_view>
+
+namespace urlshort {
+
+/// Generates random Base62 short codes.
+///
+/// WHY THIS WON'T COLLIDE
+/// ---------------------
+/// Two independent mechanisms, and only the second one is load-bearing:
+///
+///  1. Probabilistic. 7 characters over a 62-symbol alphabet is 62^7 ~= 3.52e12
+///     codes, ~41.7 bits of entropy. Draws come from std::random_device (a
+///     CSPRNG on every platform we target) with rejection sampling to remove
+///     modulo bias, so every code is uniform and unpredictable. At 1e8 stored
+///     links the table is 0.003% full, so a fresh draw collides with
+///     probability ~3e-5.
+///
+///  2. Structural, and this is the one that actually guarantees correctness.
+///     `links.code` carries a UNIQUE constraint. Uniqueness is enforced by the
+///     database, not by our luck: an insert that loses a race is *rejected*,
+///     and we redraw. Correctness therefore does not depend on the entropy
+///     argument at all - the entropy argument only explains why the retry loop
+///     almost never runs. With `max_attempts` retries, the chance of giving up
+///     at 1e8 links is (3e-5)^8, i.e. never.
+///
+/// This is why the generator takes an `is_taken` predicate instead of owning
+/// the check: the authoritative answer lives in the store's UNIQUE index, and
+/// the pre-check is only an optimisation that keeps us from burning a
+/// transaction on a known-bad code.
+class CodeGenerator {
+public:
+    /// Base62: [0-9A-Za-z]. No '-' or '_' (base64url) so codes survive being
+    /// pasted into text that auto-formats, double-clicked as a single word, and
+    /// spoken aloud without punctuation. The cost, accepted knowingly, is that
+    /// visually confusable pairs (0/O, 1/l) remain.
+    static constexpr std::string_view kAlphabet =
+        "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
+
+    explicit CodeGenerator(std::size_t length = 7, int max_attempts = 8);
+
+    /// One uniformly random code. Never consults storage.
+    std::string generate() const;
+
+    /// Draw until `is_taken` says no, or throw ErrorCode::CodeExhausted.
+    std::string generate_unique(const std::function<bool(const std::string&)>& is_taken) const;
+
+    /// Charset/length check for machine-generated codes.
+    static bool is_valid_code(std::string_view code);
+
+    /// Charset/length check for user-supplied aliases. Looser than
+    /// `is_valid_code`: aliases are for humans, so '-' and '_' are allowed and
+    /// the length is 3..32.
+    static bool is_valid_alias(std::string_view alias);
+
+    std::size_t length() const noexcept { return length_; }
+
+private:
+    std::size_t length_;
+    int         max_attempts_;
+};
+
+}  // namespace urlshort
